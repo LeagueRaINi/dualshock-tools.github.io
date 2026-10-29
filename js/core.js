@@ -125,6 +125,10 @@ function gboot() {
     $('#edgeModalDontShowAgain').on('change', function() {
       Storage.edgeModalDontShowAgain.set(this.checked);
     });
+
+    // Keep content clear of the fixed-bottom footer (which can wrap to multiple rows on narrow widths)
+    adjustFooterClearance();
+    window.addEventListener('resize', adjustFooterClearance);
   }
 
   // Since modules are deferred, DOM might already be loaded
@@ -146,6 +150,15 @@ function gboot() {
   $("#aboutdrift").show();
   updateLastConnectedInfo();
   navigator.hid.addEventListener("disconnect", handleDisconnectedDevice);
+}
+
+// Reserve space at the bottom of the page for the fixed-position footer, whose height
+// varies (it wraps to multiple rows on narrow viewports). The scss padding-bottom is a
+// pre-JS fallback; this refines it to the real footer height plus a small margin.
+function adjustFooterClearance() {
+  const footerEl = document.querySelector('footer.fixed-bottom');
+  if (!footerEl) return;
+  document.body.style.paddingBottom = (footerEl.offsetHeight + 24) + 'px';
 }
 
 async function connect() {
@@ -1240,7 +1253,8 @@ function render_info_to_dom(infoItems) {
   $("#fwinfoextra-fw").html("");
   $("#fwinfoextra-usage").html("");
   $("#fwinfoextra-presses").html("");
-  $("#info-card-usage, #info-card-presses").hide();
+  $("#fwinfoextra-errors").html("");
+  $("#info-card-usage, #info-card-presses, #info-card-errors").hide();
 
   if (!Array.isArray(infoItems)) return;
 
@@ -1275,9 +1289,10 @@ function render_info_to_dom(infoItems) {
 
   render_press_bars(pressItems);
 
-  // Usage counters are only available on some controllers
+  // The usage, presses and diagnostics cards are only shown when the controller reports that data
   $("#info-card-usage").toggle($("#fwinfoextra-usage").html() !== "");
   $("#info-card-presses").toggle($("#fwinfoextra-presses").html() !== "");
+  $("#info-card-errors").toggle($("#fwinfoextra-errors").html() !== "");
 }
 
 function escapeHtmlText(text) {

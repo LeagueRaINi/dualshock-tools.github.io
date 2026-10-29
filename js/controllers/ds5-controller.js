@@ -69,9 +69,9 @@ function telemetryU32(view, offset) {
   return v === 0xFFFFFFFF ? 0 : v;
 }
 
-function telemetrySeconds(view, offset) {
-  const v = view.getUint32(offset, true) & 0xFFFFFF;
-  return v < 0xFFFF00 ? v : 0;
+function telemetryU8(view, offset) {
+  const v = view.getUint8(offset);
+  return v === 0xFF ? 0 : v;
 }
 
 function formatDuration(totalSeconds) {
@@ -90,18 +90,39 @@ function formatDuration(totalSeconds) {
 function telemetryToInfoItems(view) {
   const usage = (key, value) => ({ key, value, cat: "usage", isExtra: true });
   const press = (key, value) => ({ key, value, cat: "presses", isExtra: true });
+  const error = (key, value) => ({ key, value, cat: "errors", isExtra: true });
   const items = [
-    usage(l("Total Active Time"), formatDuration(telemetrySeconds(view, 21))),
-    usage(l("Total Charging Time"), formatDuration(telemetrySeconds(view, 25))),
-    usage(l("Haptics Active Time"), formatDuration(telemetrySeconds(view, 29))),
+    usage(l("Total Active Time"), formatDuration(telemetryU32(view, 21))),
+    usage(l("Total Charging Time"), formatDuration(telemetryU32(view, 25))),
+    usage(l("Haptics Active Time"), formatDuration(telemetryU32(view, 29))),
     usage(l("Adaptive Trigger Active Time (L / R)"),
       formatDuration(telemetryU32(view, 33)) + " / " + formatDuration(telemetryU32(view, 37))),
+    usage(l("Telemetry Record Count"), telemetryU32(view, 17)),
     usage(l("Battery Charge Count"), telemetryU16(view, 41)),
     usage(l("Full Charge Count"), telemetryU16(view, 60)),
+    usage(l("Charger Connect Count"), telemetryU16(view, 55)),
     usage(l("USB Connections"), telemetryU16(view, 66)),
+    usage(l("USB SDP Detect Count"), telemetryU16(view, 43)),
+    usage(l("USB CDP Detect Count"), telemetryU16(view, 45)),
+    usage(l("USB DCP Detect Count"), telemetryU16(view, 47)),
+    usage(l("USB Type-C 1.5A Detect Count"), telemetryU16(view, 49)),
+    usage(l("USB Type-C 3.0A Detect Count"), telemetryU16(view, 51)),
+    usage(l("USB Unknown Detect Count"), telemetryU16(view, 53)),
     usage(l("Bluetooth Connections"), telemetryU16(view, 68)),
+    usage(l("Bluetooth Connect Timeouts"), telemetryU16(view, 70)),
+    usage(l("Headset Detect Count"), telemetryU16(view, 62)),
+    usage(l("Headphone Detect Count"), telemetryU16(view, 64)),
     usage(l("Left Stick Round Trips (X / Y)"), telemetryU32(view, 86) + " / " + telemetryU32(view, 92)),
     usage(l("Right Stick Round Trips (X / Y)"), telemetryU32(view, 98) + " / " + telemetryU32(view, 104)),
+    usage(l("Left Stick Range (X / Y)"), telemetryU16(view, 90) + " / " + telemetryU16(view, 96)),
+    usage(l("Right Stick Range (X / Y)"), telemetryU16(view, 102) + " / " + telemetryU16(view, 108)),
+    error(l("Battery Charge Voltage Errors"), telemetryU8(view, 57)),
+    error(l("Battery Charge Temperature Errors"), telemetryU8(view, 58)),
+    error(l("Battery Charge PMIC Errors"), telemetryU8(view, 59)),
+    error(l("Sub-CPU Startup Errors"), telemetryU16(view, 72)),
+    error(l("Auth Challenge Count"), telemetryU32(view, 74)),
+    error(l("Auth Success Count"), telemetryU32(view, 78)),
+    error(l("Auth Fail Count"), telemetryU32(view, 82)),
     press(l("Touchpad Touches"), telemetryU32(view, 110 + 14 * 4)),
     press(l("Touchpad Clicks"), telemetryU32(view, 110 + 15 * 4)),
   ];
@@ -444,9 +465,9 @@ class DS5Controller extends BaseController {
       if (battery_mv !== null)
         infoItems.push({ key: l("Battery Voltage"), value: (battery_mv / 1000).toFixed(2) + " V", cat: "hw", isExtra: true });
 
-      const battery_temp = await this.getBatteryTemperature();
-      if (battery_temp !== null)
-        infoItems.push({ key: l("Battery Temperature"), value: (battery_temp / 100).toFixed(1) + " \u00b0C", cat: "hw", isExtra: true });
+      const cmd43_word1 = await this.getCmd43Word1();
+      if (cmd43_word1 !== null)
+        infoItems.push({ key: l("Unknown (cmd 4,3)"), value: String(cmd43_word1), cat: "hw", isExtra: true });
 
       // The usage counter layout below is the standard DualSense one; the Edge stores a different layout.
       if (!is_edge && updversion >= DS5_TELEMETRY_MIN_UPDATE_VERSION) {
@@ -547,8 +568,8 @@ class DS5Controller extends BaseController {
     }
   }
 
-  /** Battery temperature in centi-degrees C (power device, temperature action), or null. */
-  async getBatteryTemperature() {
+  /** Raw word1 from factory command (4,3); unconfirmed meaning, or null. */
+  async getCmd43Word1() {
     try {
       const data = await this.testCommand(4, 3, 4);
       const raw = data ? new DataView(data).getUint16(2, true) : 0;

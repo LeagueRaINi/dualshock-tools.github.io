@@ -1238,12 +1238,23 @@ function render_info_to_dom(infoItems) {
   $("#fwinfo").html("");
   $("#fwinfoextra-hw").html("");
   $("#fwinfoextra-fw").html("");
+  $("#fwinfoextra-usage").html("");
+  $("#fwinfoextra-presses").html("");
+  $("#info-card-usage, #info-card-presses").hide();
 
   if (!Array.isArray(infoItems)) return;
 
   // Add new info items
-  infoItems.forEach(({key, value, addInfoIcon, severity, isExtra, cat, copyable}) => {
+  const pressItems = [];
+  infoItems.forEach((item) => {
+    const {key, value, severity, isExtra, cat, copyable} = item;
     if (!key) return;
+
+    // Button & touchpad press counts are rendered as a bar chart, not <dt>/<dd> rows
+    if (cat === "presses") {
+      pressItems.push(item);
+      return;
+    }
 
     // Compose value with optional info icon
     let valueHtml = String(value ?? "");
@@ -1261,6 +1272,48 @@ function render_info_to_dom(infoItems) {
       appendInfo(key, valueHtml, cat || "hw", copyable ?? false);
     }
   });
+
+  render_press_bars(pressItems);
+
+  // Usage counters are only available on some controllers
+  $("#info-card-usage").toggle($("#fwinfoextra-usage").html() !== "");
+  $("#info-card-presses").toggle($("#fwinfoextra-presses").html() !== "");
+}
+
+function escapeHtmlText(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// Render button/touchpad press counts as a sorted horizontal bar chart. Each row
+// shows the label, a bar proportional to the largest count, and the count itself.
+// Colors use Bootstrap CSS variables so the chart adapts to light/dark themes.
+function render_press_bars(items) {
+  const container = $("#fwinfoextra-presses");
+  container.html("");
+  if (!Array.isArray(items) || items.length === 0) return;
+
+  const counts = items.map((it) => Math.max(0, Number(it.value) || 0));
+  const max = Math.max(1, ...counts);
+  const rows = items
+    .map((it, i) => ({ label: it.key, count: counts[i] }))
+    .sort((a, b) => b.count - a.count);
+
+  let html = "";
+  for (const { label, count } of rows) {
+    const pct = Math.round((count / max) * 100);
+    html += '<div class="col-12 d-flex align-items-center" style="gap:0.5rem;margin-bottom:0.4rem;">'
+      + '<span class="text-muted text-truncate" title="' + escapeHtmlText(label) + '" style="flex:0 0 8.75rem;min-width:8.75rem;">' + escapeHtmlText(label) + '</span>'
+      + '<span style="flex:1 1 auto;height:0.9rem;background:var(--bs-secondary-bg);border:1px solid var(--bs-border-color);border-radius:0.25rem;overflow:hidden;">'
+      + '<span style="display:block;height:100%;width:' + pct + '%;background:var(--bs-primary);"></span>'
+      + '</span>'
+      + '<span style="flex:0 0 auto;min-width:3.5rem;text-align:right;font-variant-numeric:tabular-nums;">' + count.toLocaleString() + '</span>'
+      + '</div>';
+  }
+  container.html(html);
 }
 
 function copyValueToClipboard(text) {

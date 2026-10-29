@@ -46,6 +46,72 @@ const DS5_INPUT_CONFIG = {
   touchpadOffset: 32,
 };
 
+// Usage counter block (test device 0x70). Sony's own tool only reads it from update version 0x0453 on.
+const DS5_TELEMETRY_MIN_UPDATE_VERSION = 0x0453;
+const DS5_TELEMETRY_PAGES = 6;
+
+// Push counters of the standard DualSense layout: 4 bytes each, starting at offset 110
+const DS5_TELEMETRY_BUTTONS = [
+  '↑', '↓', '←', '→', '△', '✕', '□', '○',
+  'L1', 'L2', 'L3', 'R1', 'R2', 'R3',
+  null /* touchpad touch */, null /* touchpad click */,
+  'Options', 'Create', 'PS', 'Mute',
+];
+
+// Unwritten NVRAM counters read back as 0xFF.. so treat those as zero
+function telemetryU16(view, offset) {
+  const v = view.getUint16(offset, true);
+  return v === 0xFFFF ? 0 : v;
+}
+
+function telemetryU32(view, offset) {
+  const v = view.getUint32(offset, true);
+  return v === 0xFFFFFFFF ? 0 : v;
+}
+
+function telemetrySeconds(view, offset) {
+  const v = view.getUint32(offset, true) & 0xFFFFFF;
+  return v < 0xFFFF00 ? v : 0;
+}
+
+function formatDuration(totalSeconds) {
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts = [];
+  if (days) parts.push(`${days}d`);
+  if (days || hours) parts.push(`${hours}h`);
+  if (days || hours || minutes) parts.push(`${minutes}m`);
+  parts.push(`${seconds}s`);
+  return parts.join(' ');
+}
+
+function telemetryToInfoItems(view) {
+  const usage = (key, value) => ({ key, value, cat: "usage", isExtra: true });
+  const press = (key, value) => ({ key, value, cat: "presses", isExtra: true });
+  const items = [
+    usage(l("Total Active Time"), formatDuration(telemetrySeconds(view, 21))),
+    usage(l("Total Charging Time"), formatDuration(telemetrySeconds(view, 25))),
+    usage(l("Haptics Active Time"), formatDuration(telemetrySeconds(view, 29))),
+    usage(l("Adaptive Trigger Active Time (L / R)"),
+      formatDuration(telemetryU32(view, 33)) + " / " + formatDuration(telemetryU32(view, 37))),
+    usage(l("Battery Charge Count"), telemetryU16(view, 41)),
+    usage(l("Full Charge Count"), telemetryU16(view, 60)),
+    usage(l("USB Connections"), telemetryU16(view, 66)),
+    usage(l("Bluetooth Connections"), telemetryU16(view, 68)),
+    usage(l("Left Stick Round Trips (X / Y)"), telemetryU32(view, 86) + " / " + telemetryU32(view, 92)),
+    usage(l("Right Stick Round Trips (X / Y)"), telemetryU32(view, 98) + " / " + telemetryU32(view, 104)),
+    press(l("Touchpad Touches"), telemetryU32(view, 110 + 14 * 4)),
+    press(l("Touchpad Clicks"), telemetryU32(view, 110 + 15 * 4)),
+  ];
+  DS5_TELEMETRY_BUTTONS.forEach((name, i) => {
+    if (name)
+      items.push(press(name, telemetryU32(view, 110 + i * 4)));
+  });
+  return items;
+}
+
 // DS5 Adaptive Trigger Effect Modes
 const DS5_TRIGGER_EFFECT_MODE = {
   OFF: 0x00,           // No effect
@@ -314,6 +380,8 @@ class DS5Controller extends BaseController {
       const touchpad_id = await this.getSystemInfo(5, 2, 8, false);
       const touchpad_fw = await this.getSystemInfo(5, 4, 8, false);
       const serial_number = await this.getSystemInfo(1, 19, 17);
+      const bt_patch = await this.getBtPatchVersion();
+      const report22 = await this.getUnknownReport22Fields();
       const color = ds5_color(serial_number);
       const infoItems = [
         { key: l("Serial Number"), value: serial_number, cat: "hw", copyable: true },
@@ -337,6 +405,12 @@ class DS5Controller extends BaseController {
         { key: l("SBL FW Version"), value: "0x" + dec2hex32(fwversion1), cat: "fw", isExtra: true },
         { key: l("Venom FW Version"), value: "0x" + dec2hex32(fwversion2), cat: "fw", isExtra: true },
         { key: l("Spider FW Version"), value: "0x" + dec2hex32(fwversion3), cat: "fw", isExtra: true },
+        ...(bt_patch !== null ? [{ key: l("BT Patch Version"), value: "0x" + dec2hex32(bt_patch), cat: "fw", isExtra: true }] : []),
+        ...(report22 !== null ? [
+          { key: l("Unknown ID (0x22)"), value: report22.id, cat: "fw", isExtra: true },
+          { key: l("Unknown Version (0x22)"), value: report22.version, cat: "fw", isExtra: true },
+          { key: l("Unknown Value (0x22)"), value: report22.build, cat: "fw", isExtra: true },
+        ] : []),
 
         // Many controllers (any board, incl. BDM-010 on 2024 firmware) and clones
         // don't answer the touchpad query
@@ -361,6 +435,25 @@ class DS5Controller extends BaseController {
       const nv = await this.queryNvStatus();
       const bd_addr = await this.getBdAddr();
       infoItems.push({ key: l("Bluetooth Address"), value: bd_addr, cat: "hw", isExtra: true });
+
+      const host_addr = await this.getPairedHostAddr();
+      if (host_addr)
+        infoItems.push({ key: l("Paired Host Address"), value: host_addr, cat: "hw", isExtra: true });
+
+      const battery_mv = await this.getBatteryVoltage();
+      if (battery_mv !== null)
+        infoItems.push({ key: l("Battery Voltage"), value: (battery_mv / 1000).toFixed(2) + " V", cat: "hw", isExtra: true });
+
+      const battery_temp = await this.getBatteryTemperature();
+      if (battery_temp !== null)
+        infoItems.push({ key: l("Battery Temperature"), value: (battery_temp / 100).toFixed(1) + " \u00b0C", cat: "hw", isExtra: true });
+
+      // The usage counter layout below is the standard DualSense one; the Edge stores a different layout.
+      if (!is_edge && updversion >= DS5_TELEMETRY_MIN_UPDATE_VERSION) {
+        const telemetry = await this.readTelemetry();
+        if (telemetry)
+          infoItems.push(...telemetryToInfoItems(telemetry));
+      }
 
       const pending_reboot = (nv?.status === 'pending_reboot');
 
@@ -420,16 +513,126 @@ class DS5Controller extends BaseController {
     return format_mac_from_view(data, 4);
   }
 
-  async getSystemInfo(base, num, length, decode = true) {
-    await this.sendFeatureReport(128, [base,num])
-    const pcba_id = await this.receiveFeatureReport(129);
-    if(pcba_id.getUint8(1) != base || pcba_id.getUint8(2) != num || pcba_id.getUint8(3) != 2) {
-      return l("error");
+  /**
+   * Run a factory test command: SET 0x80 [device, action], then poll 0x81 until it echoes
+   * [device, action, 2 (complete)]. Returns the payload, or null when the firmware ignores the
+   * command (unsupported commands never get an answer, 0x81 just stays zeroed).
+   */
+  async testCommand(device, action, length) {
+    await this.sendFeatureReport(0x80, [device, action]);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const view = await this.receiveFeatureReport(0x81);
+      if (view.getUint8(1) === device && view.getUint8(2) === action && view.getUint8(3) === 2)
+        return view.buffer.slice(4, 4 + length);
+      await sleep(10);
     }
-    if(decode)
-      return new TextDecoder().decode(pcba_id.buffer.slice(4, 4+length));
+    return null;
+  }
 
-    return buf2hex(pcba_id.buffer.slice(4, 4+length));
+  async getSystemInfo(base, num, length, decode = true) {
+    const data = await this.testCommand(base, num, length);
+    if (!data)
+      return l("error");
+    return decode ? new TextDecoder().decode(data) : buf2hex(data);
+  }
+
+  /** Battery voltage in mV (power device, battery voltage action), or null. */
+  async getBatteryVoltage() {
+    try {
+      const data = await this.testCommand(2, 6, 2);
+      const mv = data ? new DataView(data).getUint16(0, true) : 0;
+      return mv ? mv : null;
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  /** Battery temperature in centi-degrees C (power device, temperature action), or null. */
+  async getBatteryTemperature() {
+    try {
+      const data = await this.testCommand(4, 3, 4);
+      const raw = data ? new DataView(data).getUint16(2, true) : 0;
+      return (raw === 0 || raw === 0xFFFF) ? null : raw;
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  /** Bluetooth patch build number from feature report 0x22, or null. */
+  async getBtPatchVersion() {
+    try {
+      const view = await this.receiveFeatureReport(0x22);
+      if (view.getUint8(0) !== 0x22 || view.byteLength < 35)
+        return null;
+      const v = view.getUint32(31, true);
+      return v || null;
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  /** Extra fields decoded from feature report 0x22 (meaning unknown), or null. */
+  async getUnknownReport22Fields() {
+    try {
+      const b = await this.receiveFeatureReport(0x22);
+      if (b.getUint8(0) !== 0x22 || b.byteLength < 52)
+        return null;
+      let id = "";
+      for (let i = 45; i < b.byteLength; i++) {
+        const c = b.getUint8(i);
+        if (c < 0x20 || c >= 0x7f) break;
+        id += String.fromCharCode(c);
+      }
+      if (!id)
+        return null;
+      const version = `${b.getUint8(39)}.${b.getUint8(40)}.${b.getUint8(41)}.${b.getUint8(42)}`;
+      const build = buf2hex(new Uint8Array(b.buffer, b.byteOffset + 35, 4));
+      return { id, version, build };
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  /** Address of the host the controller is paired with (feature report 0x09, bytes 10-15), or null. */
+  async getPairedHostAddr() {
+    try {
+      const view = await this.receiveFeatureReport(0x09);
+      if (view.getUint8(0) !== 0x09 || view.byteLength < 16)
+        return null;
+      const addr = format_mac_from_view(view, 10);
+      return addr === "00:00:00:00:00:00" ? null : addr;
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  /**
+   * Read the usage counter block (test device 0x70, action 1), the same block Sony's
+   * PlayStation Accessories app uploads as telemetry. The controller answers with six 56-byte
+   * pages (status 3 = more pages follow, 2 = last page). Returns a DataView over the block, or null.
+   */
+  async readTelemetry() {
+    try {
+      await this.sendFeatureReport(0x80, [0x70, 1]);
+      const block = new Uint8Array(DS5_TELEMETRY_PAGES * 56);
+      let page = 0;
+      for (let attempt = 0; attempt < DS5_TELEMETRY_PAGES * 4 && page < DS5_TELEMETRY_PAGES; attempt++) {
+        const view = await this.receiveFeatureReport(0x81);
+        const status = view.getUint8(3);
+        if (view.getUint8(1) === 0x70 && view.getUint8(2) === 1 && (status === 2 || status === 3)) {
+          block.set(new Uint8Array(view.buffer.slice(4, 60)), page * 56);
+          page++;
+          if (status === 2)
+            break;
+        } else {
+          await sleep(10);
+        }
+      }
+      // Byte 0 is a status byte; the counters start right after it
+      return page === DS5_TELEMETRY_PAGES ? new DataView(block.buffer, 1) : null;
+    } catch (_e) {
+      return null;
+    }
   }
 
   async calibrateSticksBegin() {

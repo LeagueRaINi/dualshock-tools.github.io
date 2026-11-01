@@ -540,6 +540,10 @@ class DS5Controller extends BaseController {
       const bd_addr = await this.getBdAddr();
       infoItems.push({ key: l("Bluetooth Address"), value: bd_addr, cat: "hw", isExtra: true });
 
+      const host_addr = await this.getPairedHostAddr();
+      if (host_addr)
+        infoItems.push({ key: l("Paired Host Address"), value: host_addr, cat: "hw", isExtra: true });
+
       const battery_mv = await this.getBatteryVoltage();
       if (battery_mv !== null)
         infoItems.push({ key: l("Battery Voltage"), value: (battery_mv / 1000).toFixed(2) + " V", cat: "hw", isExtra: true });
@@ -556,10 +560,6 @@ class DS5Controller extends BaseController {
           unconfirmed(l("Unknown Value (0x22)"), report22.value),
         );
       }
-
-      const host_addr = await this.getPairedHostAddr();
-      if (host_addr)
-        infoItems.push(unconfirmed(l("Paired Host Address"), host_addr));
 
       const cmd43_word1 = await this.getCmd43Word1();
       if (cmd43_word1 !== null)
@@ -705,8 +705,8 @@ class DS5Controller extends BaseController {
   }
 
   /**
-   * Feature report 0x09 bytes 10-15, or null. Laid out like the DualShock 4's report 0x12, where
-   * these bytes hold the paired host's address; not confirmed for the DualSense.
+   * Feature report 0x09 bytes 10-15: address of the host the controller is paired with, or null.
+   * Same layout as the DualShock 4's report 0x12; checked against a known host on real hardware.
    */
   async getPairedHostAddr() {
     try {

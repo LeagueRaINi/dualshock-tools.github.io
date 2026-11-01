@@ -1254,7 +1254,8 @@ function render_info_to_dom(infoItems) {
   $("#fwinfoextra-usage").html("");
   $("#fwinfoextra-presses").html("");
   $("#fwinfoextra-errors").html("");
-  $("#info-card-usage, #info-card-presses, #info-card-errors").hide();
+  $("#fwinfoextra-unconfirmed").html("");
+  $("#info-card-usage, #info-card-presses, #info-card-errors, #info-card-unconfirmed").hide();
 
   if (!Array.isArray(infoItems)) return;
 
@@ -1289,10 +1290,11 @@ function render_info_to_dom(infoItems) {
 
   render_press_bars(pressItems);
 
-  // The usage, presses and diagnostics cards are only shown when the controller reports that data
+  // The usage, presses, diagnostics and unconfirmed cards are only shown when the controller reports that data
   $("#info-card-usage").toggle($("#fwinfoextra-usage").html() !== "");
   $("#info-card-presses").toggle($("#fwinfoextra-presses").html() !== "");
   $("#info-card-errors").toggle($("#fwinfoextra-errors").html() !== "");
+  $("#info-card-unconfirmed").toggle($("#fwinfoextra-unconfirmed").html() !== "");
 }
 
 function escapeHtmlText(text) {

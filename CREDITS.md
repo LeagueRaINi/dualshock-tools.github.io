@@ -7,6 +7,7 @@
 ## Special Thanks
 - **Board model detection**: [Battle Beaver Customs](https://battlebeavercustoms.com/)
 - **Color detection**: romek77 from Poland
+- **Battery voltage, BT patch version and DualSense Edge usage counter cross-check**: [daidr](https://github.com/daidr) ([dualsense-tester](https://github.com/daidr/dualsense-tester))
 
 ---
 

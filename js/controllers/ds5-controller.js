@@ -46,8 +46,11 @@ const DS5_INPUT_CONFIG = {
   touchpadOffset: 32,
 };
 
-// Usage counter block (test device 0x70). Sony's own tool only reads it from update version 0x0453 on.
+// Usage counter block (test device 0x70). Sony's own tool (libFWupdater.dll) reads the same six pages on
+// both models, from update version 0x0453 on a DualSense and 0x0177 on a DualSense Edge, and decodes them
+// with a different layout per model (TelemetryDataDualSense / TelemetryDataDualSenseEdge).
 const DS5_TELEMETRY_MIN_UPDATE_VERSION = 0x0453;
+const DS5_EDGE_TELEMETRY_MIN_UPDATE_VERSION = 0x0177;
 const DS5_TELEMETRY_PAGES = 6;
 
 // Push counters of the standard DualSense layout: 4 bytes each, starting at offset 110
@@ -57,6 +60,13 @@ const DS5_TELEMETRY_BUTTONS = [
   null /* touchpad touch */, null /* touchpad click */,
   'Options', 'Create', 'PS', 'Mute',
 ];
+
+// DualSense Edge layout: push counters start at offset 86 (4 bytes each). L2/R2 are counted per
+// trigger stop and L3/R3 live in the stick module records instead.
+const DS5_EDGE_TELEMETRY_BUTTONS_OFFSET = 86;
+// Stick module records (37 bytes each): current left, current right, then two history slots
+const DS5_EDGE_TELEMETRY_MODULES_OFFSET = 182;
+const DS5_EDGE_TELEMETRY_MODULE_SIZE = 37;
 
 // Unwritten NVRAM counters read back as 0xFF.. so treat those as zero
 function telemetryU16(view, offset) {
@@ -87,11 +97,11 @@ function formatDuration(totalSeconds) {
   return parts.join(' ');
 }
 
-function telemetryToInfoItems(view) {
+// Fields shared by both layouts (offsets 17..85)
+function telemetryCommonItems(view) {
   const usage = (key, value) => ({ key, value, cat: "usage", isExtra: true });
-  const press = (key, value) => ({ key, value, cat: "presses", isExtra: true });
   const error = (key, value) => ({ key, value, cat: "errors", isExtra: true });
-  const items = [
+  return [
     usage(l("Total Active Time"), formatDuration(telemetryU32(view, 21))),
     usage(l("Total Charging Time"), formatDuration(telemetryU32(view, 25))),
     usage(l("Haptics Active Time"), formatDuration(telemetryU32(view, 29))),
@@ -112,10 +122,6 @@ function telemetryToInfoItems(view) {
     usage(l("Bluetooth Connect Timeouts"), telemetryU16(view, 70)),
     usage(l("Headset Detect Count"), telemetryU16(view, 62)),
     usage(l("Headphone Detect Count"), telemetryU16(view, 64)),
-    usage(l("Left Stick Round Trips (X / Y)"), telemetryU32(view, 86) + " / " + telemetryU32(view, 92)),
-    usage(l("Right Stick Round Trips (X / Y)"), telemetryU32(view, 98) + " / " + telemetryU32(view, 104)),
-    usage(l("Left Stick Range (X / Y)"), telemetryU16(view, 90) + " / " + telemetryU16(view, 96)),
-    usage(l("Right Stick Range (X / Y)"), telemetryU16(view, 102) + " / " + telemetryU16(view, 108)),
     error(l("Battery Charge Voltage Errors"), telemetryU8(view, 57)),
     error(l("Battery Charge Temperature Errors"), telemetryU8(view, 58)),
     error(l("Battery Charge PMIC Errors"), telemetryU8(view, 59)),
@@ -123,6 +129,18 @@ function telemetryToInfoItems(view) {
     error(l("Auth Challenge Count"), telemetryU32(view, 74)),
     error(l("Auth Success Count"), telemetryU32(view, 78)),
     error(l("Auth Fail Count"), telemetryU32(view, 82)),
+  ];
+}
+
+function telemetryToInfoItems(view) {
+  const usage = (key, value) => ({ key, value, cat: "usage", isExtra: true });
+  const press = (key, value) => ({ key, value, cat: "presses", isExtra: true });
+  const items = [
+    ...telemetryCommonItems(view),
+    usage(l("Left Stick Round Trips (X / Y)"), telemetryU32(view, 86) + " / " + telemetryU32(view, 92)),
+    usage(l("Right Stick Round Trips (X / Y)"), telemetryU32(view, 98) + " / " + telemetryU32(view, 104)),
+    usage(l("Left Stick Range (X / Y)"), telemetryU16(view, 90) + " / " + telemetryU16(view, 96)),
+    usage(l("Right Stick Range (X / Y)"), telemetryU16(view, 102) + " / " + telemetryU16(view, 108)),
     press(l("Touchpad Touches"), telemetryU32(view, 110 + 14 * 4)),
     press(l("Touchpad Clicks"), telemetryU32(view, 110 + 15 * 4)),
   ];
@@ -130,6 +148,78 @@ function telemetryToInfoItems(view) {
     if (name)
       items.push(press(name, telemetryU32(view, 110 + i * 4)));
   });
+  return items;
+}
+
+// Serial numbers are 17 ASCII bytes, padded with 0x00 (or 0xFF when never written)
+function telemetrySerial(view, offset) {
+  let s = "";
+  for (let i = 0; i < 17; i++) {
+    const c = view.getUint8(offset + i);
+    if (c === 0x00 || c === 0xFF) break;
+    s += String.fromCharCode(c);
+  }
+  return s;
+}
+
+function edgeTelemetryModule(view, index) {
+  const o = DS5_EDGE_TELEMETRY_MODULES_OFFSET + index * DS5_EDGE_TELEMETRY_MODULE_SIZE;
+  return {
+    serial: telemetrySerial(view, o),
+    roundTrips: telemetryU32(view, o + 17) + " / " + telemetryU32(view, o + 23),
+    range: telemetryU16(view, o + 21) + " / " + telemetryU16(view, o + 27),
+    stickPresses: telemetryU32(view, o + 29),
+    fnPresses: telemetryU32(view, o + 33),
+  };
+}
+
+function edgeTelemetryToInfoItems(view) {
+  const usage = (key, value, copyable) => ({ key, value, cat: "usage", isExtra: true, copyable });
+  const press = (key, value) => ({ key, value, cat: "presses", isExtra: true });
+  const counter = (i) => telemetryU32(view, DS5_EDGE_TELEMETRY_BUTTONS_OFFSET + i * 4);
+  const stops = [l("Short"), l("Middle"), l("Full")];
+
+  const left = edgeTelemetryModule(view, 0);
+  const right = edgeTelemetryModule(view, 1);
+  const items = [
+    ...telemetryCommonItems(view),
+    usage(l("Left Stick Round Trips (X / Y)"), left.roundTrips),
+    usage(l("Right Stick Round Trips (X / Y)"), right.roundTrips),
+    usage(l("Left Stick Range (X / Y)"), left.range),
+    usage(l("Right Stick Range (X / Y)"), right.range),
+  ];
+
+  // Sony's stickModuleHistory1/2 records; slots that were never written have no serial
+  for (let slot = 1; slot <= 2; slot++) {
+    const prev = edgeTelemetryModule(view, 1 + slot);
+    if (!prev.serial) continue;
+    const name = l("Stick Module History") + " " + slot;
+    items.push(
+      usage(name, prev.serial, true),
+      usage(name + " " + l("Round Trips (X / Y)"), prev.roundTrips),
+      usage(name + " " + l("Range (X / Y)"), prev.range),
+      usage(name + " " + l("Presses (Stick / Fn)"), prev.stickPresses + " / " + prev.fnPresses),
+    );
+  }
+
+  ['↑', '↓', '←', '→', '△', '✕', '□', '○', 'L1'].forEach((name, i) => items.push(press(name, counter(i))));
+  stops.forEach((stop, i) => items.push(press(`L2 (${stop})`, counter(9 + i))));
+  items.push(press('R1', counter(12)));
+  stops.forEach((stop, i) => items.push(press(`R2 (${stop})`, counter(13 + i))));
+  items.push(
+    press(l("Touchpad Touches"), counter(16)),
+    press(l("Touchpad Clicks"), counter(17)),
+    press('Options', counter(18)),
+    press('Create', counter(19)),
+    press('PS', counter(20)),
+    press('Mute', counter(21)),
+    press('LB', counter(22)),
+    press('RB', counter(23)),
+    press('L3', left.stickPresses),
+    press('R3', right.stickPresses),
+    press('Fn L', left.fnPresses),
+    press('Fn R', right.fnPresses),
+  );
   return items;
 }
 
@@ -401,8 +491,7 @@ class DS5Controller extends BaseController {
       const touchpad_id = await this.getSystemInfo(5, 2, 8, false);
       const touchpad_fw = await this.getSystemInfo(5, 4, 8, false);
       const serial_number = await this.getSystemInfo(1, 19, 17);
-      const bt_patch = await this.getBtPatchVersion();
-      const report22 = await this.getUnknownReport22Fields();
+      const report22 = await this.getReport22();
       const color = ds5_color(serial_number);
       const infoItems = [
         { key: l("Serial Number"), value: serial_number, cat: "hw", copyable: true },
@@ -426,12 +515,6 @@ class DS5Controller extends BaseController {
         { key: l("SBL FW Version"), value: "0x" + dec2hex32(fwversion1), cat: "fw", isExtra: true },
         { key: l("Venom FW Version"), value: "0x" + dec2hex32(fwversion2), cat: "fw", isExtra: true },
         { key: l("Spider FW Version"), value: "0x" + dec2hex32(fwversion3), cat: "fw", isExtra: true },
-        ...(bt_patch !== null ? [{ key: l("BT Patch Version"), value: "0x" + dec2hex32(bt_patch), cat: "fw", isExtra: true }] : []),
-        ...(report22 !== null ? [
-          { key: l("Unknown ID (0x22)"), value: report22.id, cat: "fw", isExtra: true },
-          { key: l("Unknown Version (0x22)"), value: report22.version, cat: "fw", isExtra: true },
-          { key: l("Unknown Value (0x22)"), value: report22.build, cat: "fw", isExtra: true },
-        ] : []),
 
         // Many controllers (any board, incl. BDM-010 on 2024 firmware) and clones
         // don't answer the touchpad query
@@ -457,23 +540,36 @@ class DS5Controller extends BaseController {
       const bd_addr = await this.getBdAddr();
       infoItems.push({ key: l("Bluetooth Address"), value: bd_addr, cat: "hw", isExtra: true });
 
-      const host_addr = await this.getPairedHostAddr();
-      if (host_addr)
-        infoItems.push({ key: l("Paired Host Address"), value: host_addr, cat: "hw", isExtra: true });
-
       const battery_mv = await this.getBatteryVoltage();
       if (battery_mv !== null)
         infoItems.push({ key: l("Battery Voltage"), value: (battery_mv / 1000).toFixed(2) + " V", cat: "hw", isExtra: true });
 
+      if (report22?.bt_patch)
+        infoItems.push({ key: l("BT Patch Version"), value: "0x" + dec2hex32(report22.bt_patch), cat: "fw", isExtra: true });
+
+      // Fields with no documented meaning; shown in their own card
+      const unconfirmed = (key, value) => ({ key, value, cat: "unconfirmed", isExtra: true });
+      if (report22?.id) {
+        infoItems.push(
+          unconfirmed(l("Unknown ID (0x22)"), report22.id),
+          unconfirmed(l("Unknown Version (0x22)"), report22.version),
+          unconfirmed(l("Unknown Value (0x22)"), report22.value),
+        );
+      }
+
+      const host_addr = await this.getPairedHostAddr();
+      if (host_addr)
+        infoItems.push(unconfirmed(l("Paired Host Address"), host_addr));
+
       const cmd43_word1 = await this.getCmd43Word1();
       if (cmd43_word1 !== null)
-        infoItems.push({ key: l("Unknown (cmd 4,3)"), value: String(cmd43_word1), cat: "hw", isExtra: true });
+        infoItems.push(unconfirmed(l("Unknown (cmd 4,3)"), String(cmd43_word1)));
 
-      // The usage counter layout below is the standard DualSense one; the Edge stores a different layout.
-      if (!is_edge && updversion >= DS5_TELEMETRY_MIN_UPDATE_VERSION) {
+      const telemetry_min = is_edge ? DS5_EDGE_TELEMETRY_MIN_UPDATE_VERSION : DS5_TELEMETRY_MIN_UPDATE_VERSION;
+      if (updversion >= telemetry_min) {
         const telemetry = await this.readTelemetry();
         if (telemetry)
-          infoItems.push(...telemetryToInfoItems(telemetry));
+          infoItems.push(...(is_edge ? edgeTelemetryToInfoItems(telemetry) : telemetryToInfoItems(telemetry)));
       }
 
       const pending_reboot = (nv?.status === 'pending_reboot');
@@ -557,7 +653,10 @@ class DS5Controller extends BaseController {
     return decode ? new TextDecoder().decode(data) : buf2hex(data);
   }
 
-  /** Battery voltage in mV (power device, battery voltage action), or null. */
+  /**
+   * Battery voltage in mV, or null. Test command (2,6) is named BATTERY_VOLTAGE in the test command
+   * table of daidr's dualsense-tester; word 0 of command (4,3) reads back the same value.
+   */
   async getBatteryVoltage() {
     try {
       const data = await this.testCommand(2, 6, 2);
@@ -568,7 +667,7 @@ class DS5Controller extends BaseController {
     }
   }
 
-  /** Raw word1 from factory command (4,3); unconfirmed meaning, or null. */
+  /** Word 1 of test command (4,3), whose word 0 mirrors the battery voltage; meaning unknown, or null. */
   async getCmd43Word1() {
     try {
       const data = await this.testCommand(4, 3, 4);
@@ -579,42 +678,36 @@ class DS5Controller extends BaseController {
     }
   }
 
-  /** Bluetooth patch build number from feature report 0x22, or null. */
-  async getBtPatchVersion() {
+  /**
+   * Feature report 0x22, or null. Bytes 31-34 are the BT patch version as named by daidr's
+   * dualsense-tester; the meaning of the other fields decoded here is unknown.
+   */
+  async getReport22() {
     try {
       const view = await this.receiveFeatureReport(0x22);
-      if (view.getUint8(0) !== 0x22 || view.byteLength < 35)
-        return null;
-      const v = view.getUint32(31, true);
-      return v || null;
-    } catch (_e) {
-      return null;
-    }
-  }
-
-  /** Extra fields decoded from feature report 0x22 (meaning unknown), or null. */
-  async getUnknownReport22Fields() {
-    try {
-      const b = await this.receiveFeatureReport(0x22);
-      if (b.getUint8(0) !== 0x22 || b.byteLength < 52)
+      if (view.getUint8(0) !== 0x22 || view.byteLength < 52)
         return null;
       let id = "";
-      for (let i = 45; i < b.byteLength; i++) {
-        const c = b.getUint8(i);
+      for (let i = 45; i < view.byteLength; i++) {
+        const c = view.getUint8(i);
         if (c < 0x20 || c >= 0x7f) break;
         id += String.fromCharCode(c);
       }
-      if (!id)
-        return null;
-      const version = `${b.getUint8(39)}.${b.getUint8(40)}.${b.getUint8(41)}.${b.getUint8(42)}`;
-      const build = buf2hex(new Uint8Array(b.buffer, b.byteOffset + 35, 4));
-      return { id, version, build };
+      return {
+        bt_patch: view.getUint32(31, true),
+        id,
+        version: [39, 40, 41, 42].map(i => view.getUint8(i)).join("."),
+        value: buf2hex(view.buffer.slice(35, 39)),
+      };
     } catch (_e) {
       return null;
     }
   }
 
-  /** Address of the host the controller is paired with (feature report 0x09, bytes 10-15), or null. */
+  /**
+   * Feature report 0x09 bytes 10-15, or null. Laid out like the DualShock 4's report 0x12, where
+   * these bytes hold the paired host's address; not confirmed for the DualSense.
+   */
   async getPairedHostAddr() {
     try {
       const view = await this.receiveFeatureReport(0x09);
@@ -629,7 +722,7 @@ class DS5Controller extends BaseController {
 
   /**
    * Read the usage counter block (test device 0x70, action 1), the same block Sony's
-   * PlayStation Accessories app uploads as telemetry. The controller answers with six 56-byte
+   * PlayStation Accessories app reads as telemetry (libFWupdater.dll). The controller answers with six 56-byte
    * pages (status 3 = more pages follow, 2 = last page). Returns a DataView over the block, or null.
    */
   async readTelemetry() {
